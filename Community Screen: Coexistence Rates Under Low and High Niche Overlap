@@ -1,0 +1,270 @@
+clear all; close all; clc;
+%% =========================================================================
+% CRM Community Screen — free parameter generation
+%
+% Parameters drawn independently — coexistence is NOT enforced.
+% Jacobian computed only at coexistence equilibria (both N > tol)
+% to avoid numerical instability at exclusion boundaries.
+% Stores |m1-m2| to test mortality gap theory.
+% =========================================================================
+rng(42);
+N_sp = 2;
+R_res = 2;
+N_each = 500;
+T_settle = 2000;
+ODE_OPTS = odeset('RelTol',1e-6,'AbsTol',1e-8,'MaxStep',10);
+regimes(1).name = 'Low overlap (cos < 0.4)';
+regimes(1).cos_lo = 0.0; regimes(1).cos_hi = 0.4;
+regimes(2).name = 'High overlap (cos > 0.95)';
+regimes(2).cos_lo = 0.95; regimes(2).cos_hi = 1.0;
+for regime = 1:2
+nc=0; ne1=0; ne2=0; nother=0; nfail=0;
+cos_store = nan(N_each,1);
+lmax_store = nan(N_each,1); % only filled for coexistence cases
+mgap_store = nan(N_each,1); % |m1-m2|
+out_store = zeros(N_each,1);
+t=0; attempts=0;
+while t < N_each && attempts < N_each100
+attempts = attempts+1;
+%% Build C with target cosine similarity
+c1 = rand(1,R_res)+0.1;
+if regime==1
+c2r = rand(1,R_res)+0.1;
+proj = dot(c2r,c1)/dot(c1,c1)c1;
+c2perp = c2r-proj;
+if norm(c2perp)<1e-6, continue; end
+mix = 0.05+rand0.1;
+c2 = abs(mixc1/norm(c1)+(1-mix)c2perp/norm(c2perp))+0.01;
+else
+c2 = abs(c1+0.005randn(1,R_res))+0.01;
+end
+cs = dot(c1,c2)/(norm(c1)*norm(c2));
+if cs<regimes(regime).cos_lo || cs>regimes(regime).cos_hi, continue; end
+C = [c1;c2];
+%% Draw all parameters freely
+W = 0.5+rand(R_res,1);
+l = 0.2+rand(R_res,1)0.5;
+m = mean(C((1-l).W)).(0.5+rand(N_sp,1));
+R_ref = 0.5+rand(R_res,1);
+S = zeros(R_res,1);
+for a=1:R_res
+dep=R_ref(a)sum(C(:,a))0.5;
+rec=0;
+for b=1:R_res
+rec=rec+l(b)(W(b)/W(a))C(a,b)R_ref(b)sum(C(:,b))0.5;
+end
+S(a)=max(dep-rec,0.05);
+end
+params=struct('W',W,'l',l,'C',C,'m',m,'S',S);
+%% Run ODE to steady state
+x0=[0.1+rand(N_sp,1)2; 0.1+rand(R_res,1)2];
+try
+[~,Y]=ode15s(@(t,y)crm_ode(t,y,params),[0 T_settle],x0,ODE_OPTS);
+x_ss=max(Y(end,:)',0);
+catch
+nfail=nfail+1; continue;
+end
+N_ss=x_ss(1:N_sp); R_ss=x_ss(N_sp+1:end);
+if any(~isfinite(x_ss))||any(R_ss<0), nfail=nfail+1; continue; end
+%% Classify
+% tol_excl: minimum abundance to count as present at all
+% tol_coex: both species must exceed this for robust coexistence
+% — avoids counting borderline near-zero cases as coexistence
+tol_excl = 1e-3;
+tol_coex = 0.05;
+sp1 = N_ss(1) > tol_excl;
+sp2 = N_ss(2) > tol_excl;
+robust_coex = N_ss(1) > tol_coex && N_ss(2) > tol_coex;
+t=t+1;
+cos_store(t) = cs;
+mgap_store(t) = abs(m(1)-m(2));
+if robust_coex
+% Both species well above zero — genuine coexistence
+J=crm_jacobian(N_ss,R_ss,params);
+ev=real(eig(J));
+lmax_store(t)=max(ev);
+nc=nc+1; out_store(t)=1;
+elseif sp1 && ~sp2
+ne1=ne1+1; out_store(t)=2;
+elseif sp2 && ~sp1
+ne2=ne2+1; out_store(t)=3;
+elseif sp1 && sp2 && ~robust_coex
+% Both present but one is marginal — count as near-exclusion
+nother=nother+1; out_store(t)=4;
+else
+nother=nother+1; out_store(t)=4;
+end
+end
+n=t;
+regimes(regime).n = n;
+regimes(regime).nc = nc;
+regimes(regime).ne1 = ne1;
+regimes(regime).ne2 = ne2;
+regimes(regime).nother = nother;
+regimes(regime).cos_store = cos_store(1:n);
+regimes(regime).lmax_store = lmax_store(1:n);
+regimes(regime).mgap_store = mgap_store(1:n);
+regimes(regime).out_store = out_store(1:n);
+% Mortality gap threshold analysis
+% Fraction of systems with |m1-m2| below thresholds, split by outcome
+thresholds = [0.05, 0.10, 0.20];
+oc = out_store(1:n);
+mg = mgap_store(1:n);
+coex_idx = oc == 1;
+excl_idx = oc == 2 | oc == 3;
+regimes(regime).thresholds = thresholds;
+regimes(regime).frac_coex = zeros(1,length(thresholds));
+regimes(regime).frac_excl = zeros(1,length(thresholds));
+for k = 1:length(thresholds)
+thr = thresholds(k);
+if sum(coex_idx) > 0
+regimes(regime).frac_coex(k) = 100mean(mg(coex_idx) < thr);
+end
+if sum(excl_idx) > 0
+regimes(regime).frac_excl(k) = 100mean(mg(excl_idx) < thr);
+end
+end
+fprintf('Regime: %s\n',regimes(regime).name);
+fprintf(' Valid trials: %d\n',n);
+fprintf(' Coexistence: %d (%.1f%%)\n',nc, 100nc/n);
+fprintf(' Exclusion sp1 wins: %d (%.1f%%)\n',ne1, 100ne1/n);
+fprintf(' Exclusion sp2 wins: %d (%.1f%%)\n',ne2, 100ne2/n);
+fprintf(' Other/extinct: %d (%.1f%%)\n',nother,100nother/n);
+fprintf(' Mean |m1-m2| (coexist): %.4f\n', nanmean(mg(coex_idx)));
+fprintf(' Mean |m1-m2| (exclusion): %.4f\n', nanmean(mg(excl_idx)));
+fprintf(' Mean lambda_max (coexist): %.4f\n', nanmean(lmax_store(1:n)));
+fprintf(' Fraction with |m1-m2| below threshold:\n');
+fprintf(' Threshold | Coexistence | Exclusion\n');
+fprintf(' ----------|-------------|----------\n');
+for k = 1:length(thresholds)
+fprintf(' %.2f | %5.1f%% | %5.1f%%\n', ...
+thresholds(k), regimes(regime).frac_coex(k), regimes(regime).frac_excl(k));
+end
+fprintf('\n');
+end
+%% ── Figures ───────────────────────────────────────────────────────────────
+figure('Position',[100 100 1600 420]);
+% Panel 1: Outcome proportions
+subplot(1,4,1);
+data=zeros(2,3);
+for r=1:2
+n=regimes(r).n;
+data(r,:)=100[regimes(r).nc, regimes(r).ne1+regimes(r).ne2, regimes(r).nother]/n;
+end
+b=bar(data,'grouped');
+b(1).FaceColor='#1A5C8A'; b(2).FaceColor='#C04000'; b(3).FaceColor='#888780';
+set(gca,'XTickLabel',{'Low','High'},'FontSize',11);
+ylabel('Communities (%)','FontSize',11);
+xlabel('Niche overlap','FontSize',11);
+legend({'Stable coexistence','Exclusion','Other'},'Location','northeast','FontSize',8);
+title('Outcome by niche overlap','FontSize',11,'FontWeight','bold');
+box off; ylim([0 105]);
+% Panel 2: |m1-m2| by outcome and regime
+subplot(1,4,2);
+hold on;
+for r=1:2
+oc=regimes(r).out_store; mg=regimes(r).mgap_store;
+coex_mg = mg(oc==1);
+excl_mg = mg(oc==2|oc==3);
+xpos = (r-1)*3;
+if ~isempty(coex_mg)
+boxplot_manual(coex_mg, xpos+1, '#1A5C8A');
+end
+if ~isempty(excl_mg)
+boxplot_manual(excl_mg, xpos+2, '#C04000');
+end
+end
+set(gca,'XTick',[1 2 4 5],'XTickLabel',{'Coex','Excl','Coex','Excl'},'FontSize',10);
+ylabel('|m_1 - m_2|','FontSize',11);
+title('Mortality gap by outcome','FontSize',11,'FontWeight','bold');
+xline(3,'--','Color',[0.6 0.6 0.6],'LineWidth',1);
+text(1.5,max(regimes(1).mgap_store)*0.95,'Low overlap','HorizontalAlignment','center','FontSize',9,'Color','#444441');
+text(4.5,max(regimes(1).mgap_store)0.95,'High overlap','HorizontalAlignment','center','FontSize',9,'Color','#444441');
+box off;
+% Panel 3: lambda_max at coexistence equilibria only
+subplot(1,4,3);
+hold on;
+lm1=regimes(1).lmax_store; lm1=lm1(~isnan(lm1));
+lm2=regimes(2).lmax_store; lm2=lm2(~isnan(lm2));
+if ~isempty(lm1), histogram(lm1,'BinWidth',0.02,'FaceColor','#1A5C8A','FaceAlpha',0.65,'EdgeColor','none'); end
+if isempty(lm2), histogram(lm2,'BinWidth',0.02,'FaceColor','#C04000','FaceAlpha',0.65,'EdgeColor','none'); end
+xline(0,'k--','LineWidth',1.5);
+xlabel('\lambda_{max}','FontSize',11);
+ylabel('Count','FontSize',11);
+legend({'Low overlap','High overlap'},'FontSize',9);
+title('\lambda_{max} at coexistence equilibria','FontSize',11,'FontWeight','bold');
+box off;
+% Panel 4: fraction with |m1-m2| below threshold, by outcome and regime
+subplot(1,4,4);
+hold on;
+thr_vals = regimes(1).thresholds;
+x = 1:length(thr_vals);
+cols_r = {'#1A5C8A','#C04000'};
+styles = {'-o','-s'};
+regime_names = {'Low overlap','High overlap'};
+for r = 1:2
+plot(x, regimes(r).frac_coex, styles{r}, 'Color', cols_r{r}, ...
+'LineWidth', 1.5, 'MarkerFaceColor', cols_r{r}, 'DisplayName', ...
+[regime_names{r} ' — coexist']);
+plot(x, regimes(r).frac_excl, styles{r}, 'Color', cols_r{r}, ...
+'LineWidth', 1.5, 'LineStyle', '--', 'MarkerFaceColor', 'w', ...
+'DisplayName', [regime_names{r} ' — exclusion']);
+end
+set(gca, 'XTick', x, 'XTickLabel', arrayfun(@(v) sprintf('%.2f',v), thr_vals, 'UniformOutput', false), 'FontSize', 10);
+xlabel('|m_1 - m_2| threshold', 'FontSize', 11);
+ylabel('Systems below threshold (%)', 'FontSize', 11);
+title('Mortality near-equality test', 'FontSize', 11, 'FontWeight', 'bold');
+legend('Location', 'northwest', 'FontSize', 8);
+ylim([0 105]); box off;
+sgtitle('CRM community screen: niche overlap vs coexistence','FontWeight','bold','FontSize',12);
+saveas(gcf,'crm_community_screen.png');
+fprintf('Figure saved.\n');
+%% =========================================================================
+function dydt=crm_ode(,y,p)
+N=max(y(1:2),0); R=max(y(3:4),0);
+dN=zeros(2,1);
+for i=1:2
+dN(i)=N(i)(sum((1-p.l).*p.C(i,:)'.*p.W.*R)-p.m(i));
+end
+dR=zeros(2,1);
+for a=1:2
+dep=R(a)*sum(p.C(:,a).N); rec=0;
+for b=1:2
+rec=rec+p.l(b)(p.W(b)/p.W(a))*p.C(a,b)*R(b)*sum(p.C(:,b).*N);
+end
+dR(a)=p.S(a)-dep+rec;
+end
+dydt=[dN;dR]; dydt(~isfinite(dydt))=0;
+end
+function J=crm_jacobian(N,R,p)
+J=zeros(4,4);
+for i=1:2
+J(i,i)=sum((1-p.l).*p.C(i,:)'.*p.W.R)-p.m(i);
+for a=1:2, J(i,2+a)=N(i)(1-p.l(a))*p.C(i,a)p.W(a); end
+end
+for a=1:2
+for i=1:2
+rec=0;
+for b=1:2, rec=rec+p.l(b)(p.W(b)/p.W(a))*p.C(a,b)*R(b)*p.C(i,b); end
+J(2+a,i)=-p.C(i,a)*R(a)+rec;
+end
+for b=1:2
+if a==b
+J(2+a,2+b)=(p.l(a)*p.C(a,a)-1)*sum(p.C(:,a).*N);
+else
+J(2+a,2+b)=p.l(b)p.C(a,b)(p.W(b)/p.W(a))sum(p.C(:,b).N);
+end
+end
+end
+end
+function boxplot_manual(data, x, col)
+q = quantile(data,[0.25 0.5 0.75]);
+iqr_val = q(3)-q(1);
+wlo = max(min(data), q(1)-1.5iqr_val);
+whi = min(max(data), q(3)+1.5iqr_val);
+w=0.3;
+fill([x-w x+w x+w x-w x-w],[q(1) q(1) q(3) q(3) q(1)],col,'FaceAlpha',0.3,'EdgeColor',col,'LineWidth',1);
+line([x-w x+w],[q(2) q(2)],'Color',col,'LineWidth',2);
+line([x x],[wlo q(1)],'Color',col,'LineWidth',1);
+line([x x],[q(3) whi],'Color',col,'LineWidth',1);
+end
