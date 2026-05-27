@@ -1,0 +1,246 @@
+clear all; close all; clc;
+
+%% =========================================================================
+% CRM Exclusion → Coexistence Recovery Study — 5 overlap regimes
+%
+% Mirrors crm_stability_shifts.m exactly but starts from exclusion.
+% Fixed perturbation: +50% for 200 t.u., recover 5000 t.u.
+% Immigration: excluded species introduced at 0.01 at kick start.
+% =========================================================================
+
+rng(42);
+N_sp = 2;
+R_res = 2;
+N_each = 200;
+T_settle = 5000;
+T_kick = 200;
+T_recover = 5000;
+delta = 0.50;
+tol_eq = 1e-4;
+tol_coex = 0.05;
+
+ODE_OPTS = odeset('RelTol',1e-4,'AbsTol',1e-6,'MaxStep',10,'NonNegative',1:4);
+
+param_names = {'C(1,1)','C(1,2)','C(2,1)','C(2,2)',...
+'W(1)','W(2)','l(1)','l(2)',...
+'m(1)','m(2)','S(1)','S(2)'};
+n_params = length(param_names);
+
+regimes(1).name = 'Very low (0.3 < cos < 0.5)';
+regimes(1).cos_lo = 0.3; regimes(1).cos_hi = 0.5;
+regimes(2).name = 'Low (0.5 < cos < 0.7)';
+regimes(2).cos_lo = 0.5; regimes(2).cos_hi = 0.7;
+regimes(3).name = 'Moderate (0.7 < cos < 0.9)';
+regimes(3).cos_lo = 0.7; regimes(3).cos_hi = 0.9;
+regimes(4).name = 'High (0.9 < cos < 0.95)';
+regimes(4).cos_lo = 0.9; regimes(4).cos_hi = 0.95;
+regimes(5).name = 'Very high (cos > 0.95)';
+regimes(5).cos_lo = 0.95; regimes(5).cos_hi = 1.0;
+
+for regime = 1:5
+fprintf('Running regime: %s\n', regimes(regime).name);
+
+recovery_mat = zeros(N_each, n_params);
+mgap_store   = zeros(N_each, 1);
+cos_store    = zeros(N_each, 1);
+
+t = 0; attempts = 0;
+
+while t < N_each && attempts < N_each*300
+    attempts = attempts + 1;
+
+    %% Build C with target overlap
+    c1 = rand(1,R_res)+0.1;
+    if regime == 5
+        c2 = abs(c1+0.005*randn(1,R_res))+0.01;
+    else
+        found = false;
+        for attempt2 = 1:500
+            c2_try = rand(1,R_res)+0.1;
+            cs_try = dot(c1,c2_try)/(norm(c1)*norm(c2_try));
+            if cs_try >= regimes(regime).cos_lo && cs_try <= regimes(regime).cos_hi
+                c2 = c2_try; found = true; break;
+            end
+        end
+        if ~found, continue; end
+    end
+    cs = dot(c1,c2)/(norm(c1)*norm(c2));
+    if cs<regimes(regime).cos_lo || cs>regimes(regime).cos_hi, continue; end
+    C=[c1;c2];
+
+    %% Draw parameters — mortality fully random
+    W = 0.5+rand(R_res,1);
+    l = 0.2+rand(R_res,1)*0.5;
+    m = 0.1+rand(N_sp,1)*0.8;
+    R_ref = 0.5+rand(R_res,1);
+    S = zeros(R_res,1);
+    for a=1:R_res
+        dep=R_ref(a)*sum(C(:,a))*0.5; rec=0;
+        for b=1:2
+            rec=rec+l(b)*(W(b)/W(a))*C(a,b)*R_ref(b)*sum(C(:,b))*0.5;
+        end
+        S(a)=max(dep-rec,0.05);
+    end
+    params=struct('W',W,'l',l,'C',C,'m',m,'S',S);
+
+    %% Step 1: Settle
+    x0=[0.1+rand(N_sp,1)*2; 0.1+rand(R_res,1)*2];
+    try
+        [~,Y]=ode15s(@(t,y)crm_ode(t,y,params),[0 T_settle],x0,ODE_OPTS);
+        x_eq=max(Y(end,:)',0);
+    catch, continue; end
+    if any(~isfinite(x_eq)), continue; end
+
+    %% Step 2: Verify equilibrium and require exclusion
+    dxdt = crm_ode(0, x_eq, params);
+    if max(abs(dxdt)) > tol_eq, continue; end
+    N_eq = x_eq(1:N_sp);
+    R_eq = x_eq(N_sp+1:end);
+    if any(R_eq<0), continue; end
+
+    sp1p = N_eq(1) > tol_coex;
+    sp2p = N_eq(2) > tol_coex;
+    if sp1p && sp2p, continue; end    % coexistence — skip
+    if ~sp1p && ~sp2p, continue; end  % extinction — skip
+    winner = 1 + sp2p;
+
+    %% Step 3: Perturb each parameter
+    rec_this = zeros(1, n_params);
+    for p_idx = 1:n_params
+        p_pert = params;
+        switch p_idx
+            case 1,  p_pert.C(1,1)=p_pert.C(1,1)*(1+delta);
+            case 2,  p_pert.C(1,2)=p_pert.C(1,2)*(1+delta);
+            case 3,  p_pert.C(2,1)=p_pert.C(2,1)*(1+delta);
+            case 4,  p_pert.C(2,2)=p_pert.C(2,2)*(1+delta);
+            case 5,  p_pert.W(1)=p_pert.W(1)*(1+delta);
+            case 6,  p_pert.W(2)=p_pert.W(2)*(1+delta);
+            case 7,  p_pert.l(1)=p_pert.l(1)*(1+delta);
+            case 8,  p_pert.l(2)=p_pert.l(2)*(1+delta);
+            case 9,  p_pert.m(1)=p_pert.m(1)*(1+delta);
+            case 10, p_pert.m(2)=p_pert.m(2)*(1+delta);
+            case 11, p_pert.S(1)=p_pert.S(1)*(1+delta);
+            case 12, p_pert.S(2)=p_pert.S(2)*(1+delta);
+        end
+
+        % Introduce excluded species at kick start
+        x_start = x_eq;
+        if winner==1, x_start(2)=0.01; else x_start(1)=0.01; end
+
+        try
+            [~,Yk]=ode15s(@(t,y)crm_ode(t,y,p_pert),[0 T_kick],x_start,ODE_OPTS);
+            y_kick=max(Yk(end,:)',0);
+            [~,Yr]=ode15s(@(t,y)crm_ode(t,y,params),[0 T_recover],y_kick,ODE_OPTS);
+            N_f=max(Yr(end,1:N_sp)',0);
+        catch, continue; end
+
+        if N_f(1)>tol_coex && N_f(2)>tol_coex
+            rec_this(p_idx) = 1;
+        end
+    end
+
+    t = t+1;
+    recovery_mat(t,:) = rec_this;
+    mgap_store(t)     = abs(m(1)-m(2));
+    cos_store(t)      = cs;
+
+    if mod(t,50)==0, fprintf('  %d/%d done\n',t,N_each); end
+end
+
+n = t;
+regimes(regime).n            = n;
+regimes(regime).recovery_mat = recovery_mat(1:n,:);
+regimes(regime).mgap         = mgap_store(1:n);
+regimes(regime).cos_store    = cos_store(1:n);
+regimes(regime).total_rec    = sum(recovery_mat(1:n,:),2);
+
+fprintf('\nRegime: %s  (n=%d)\n', regimes(regime).name, n);
+fprintf('  Mean total recoveries per community: %.3f / %d\n',...
+        mean(sum(recovery_mat(1:n,:),2)), n_params);
+fprintf('  Recovery rate by parameter:\n');
+for p=1:n_params
+    fprintf('    %-12s  %.1f%%\n', param_names{p}, 100*mean(recovery_mat(1:n,p)));
+end
+fprintf('  Mean |m1-m2|: %.4f\n\n', mean(mgap_store(1:n)));
+end
+
+%% ── Figures ───────────────────────────────────────────────────────────────
+greys5 = {'#EEEEEE','#BBBBBB','#888888','#444444','#111111'};
+regime_labels = {'0.3–0.5','0.5–0.7','0.7–0.9','0.9–0.95','>0.95'};
+
+figure('Position',[100 100 1300 500]);
+
+% Panel 1: overall mean recovery rate per regime
+subplot(1,2,1);
+mean_rec = zeros(1,5);
+for r=1:5
+n=regimes(r).n;
+mean_rec(r) = 100*mean(mean(regimes(r).recovery_mat(1:n,:)));
+end
+b = bar(1:5, mean_rec, 0.6);
+for r=1:5, b.FaceColor='flat'; b.CData(r,:)=hex2rgb(greys5{r}); end
+set(gca,'XTick',1:5,'XTickLabel',regime_labels,'FontSize',10);
+xlabel('Cosine similarity range','FontSize',11);
+ylabel('Mean recovery rate (%)','FontSize',11);
+title('Overall recovery vs niche overlap','FontSize',11,'FontWeight','bold');
+box off;
+for i=1:5
+text(i, mean_rec(i)+0.3, sprintf('%.1f%%',mean_rec(i)),...
+'HorizontalAlignment','center','FontSize',9);
+end
+
+% Panel 2: recovery rate by parameter group
+subplot(1,2,2);
+param_groups = {[1,2,3,4],[5,6],[7,8],[9,10],[11,12]};
+group_names = {'C','W','l','m','S'};
+n_groups = length(param_groups);
+x = 1:n_groups;
+bw = 0.14;
+offsets = linspace(-2bw, 2bw, 5);
+hold on;
+for r=1:5
+n=regimes(r).n;
+grp_rates = zeros(1,n_groups);
+for g=1:n_groups
+grp_rates(g)=100*mean(mean(regimes(r).recovery_mat(1:n,param_groups{g})));
+end
+bar(x+offsets(r), grp_rates, bw, 'FaceColor', hex2rgb(greys5{r}),...
+'FaceAlpha',0.92,'EdgeColor','#333333','LineWidth',0.4,...
+'DisplayName',regime_labels{r});
+end
+set(gca,'XTick',x,'XTickLabel',group_names,'FontSize',13);
+xlabel('Parameter','FontSize',11);
+ylabel('Recovery rate (%)','FontSize',11);
+title('Recovery by parameter and overlap regime','FontSize',11,'FontWeight','bold');
+legend(regime_labels,'FontSize',8,'Location','northwest','Box','off');
+box off;
+
+sgtitle('Exclusion \rightarrow coexistence across 5 niche overlap regimes',...
+'FontWeight','bold','FontSize',11);
+saveas(gcf,'crm_exclusion_recovery.png');
+fprintf('Figure saved.\n');
+
+%% =========================================================================
+function rgb = hex2rgb(hex)
+hex = strrep(hex,'#','');
+rgb = [hex2dec(hex(1:2)) hex2dec(hex(3:4)) hex2dec(hex(5:6))]/255;
+end
+
+function dydt=crm_ode(~,y,p)
+N=max(y(1:2),0); R=max(y(3:4),0);
+N=min(N,1e6); R=min(R,1e6);
+dN=zeros(2,1);
+for i=1:2
+g=sum((1-p.l).*p.C(i,:)'.*p.W.*R)-p.m(i);
+dN(i)=N(i)*max(min(g,100),-100);
+end
+dR=zeros(2,1);
+for a=1:2
+dep=R(a)*sum(p.C(:,a).N); rec=0;
+for b=1:2
+rec=rec+p.l(b)(p.W(b)/p.W(a))*p.C(a,b)*R(b)*sum(p.C(:,b).*N);
+end
+dR(a)=p.S(a)-dep+rec;
+end
+dydt=[dN;dR]; dydt(~isfinite(dydt))=0;
+end
